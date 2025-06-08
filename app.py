@@ -5,6 +5,7 @@ import ollama
 from datetime import date, datetime
 from streamlit_calendar import calendar
 import psycopg2
+from psycopg2 import pool  # Importar o pool
 import bcrypt
 
 # --- 1. CONFIGURAÇÕES GERAIS E ESTILO ---
@@ -27,40 +28,54 @@ XP_PER_LEVEL = [100, 250, 500, 1000, 2000]
 LEVEL_NAMES = ["Noviço do Saber", "Aprendiz Focado", "Estudante Mestre", "Sábio Produtivo", "Lenda do Conhecimento"]
 
 
-# --- 3. FUNÇÕES DE BANCO DE DADOS E SERVIÇOS ---
+# --- 3. FUNÇÕES DE BANCO DE DADOS E SERVIÇOS (ADAPTADO COM POOL) ---
 
-@st.cache_resource
-def get_db_connection():
+# Criar o pool de conexões uma única vez para toda a aplicação
+@st.experimental_singleton
+def init_connection_pool():
     try:
-        conn = psycopg2.connect(**st.secrets["database"])
-        return conn
+        connection_pool = pool.SimpleConnectionPool(
+            1, 20,  # minconn, maxconn
+            **st.secrets["database"] # Usa o dicionário de secrets diretamente
+        )
+        # st.toast("Pool de conexões criado com sucesso!", icon="🔗") # Opcional: bom para debug
+        return connection_pool
     except Exception as e:
-        st.error(f"Erro ao conectar ao banco de dados: {e}")
+        st.error(f"Erro crítico ao inicializar o pool de conexões do banco de dados: {e}")
         st.stop()
 
+# Inicializa o pool globalmente para que todas as funções possam usá-lo
+db_pool = init_connection_pool()
 
 def init_db():
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS usuarios (
-              id SERIAL PRIMARY KEY, nome TEXT NOT NULL, email TEXT UNIQUE NOT NULL, senha TEXT NOT NULL,
-              xp INT DEFAULT 0, nivel INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS tarefas (
-              id SERIAL PRIMARY KEY, id_usuario INT REFERENCES usuarios(id) ON DELETE CASCADE,
-              conteudo TEXT NOT NULL, status TEXT NOT NULL, data_criacao TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS flashcards (
-              id SERIAL PRIMARY KEY, id_usuario INT REFERENCES usuarios(id) ON DELETE CASCADE,
-              frente TEXT NOT NULL, verso TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW()
-            );
-        """)
-        conn.commit()
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS usuarios (
+                  id SERIAL PRIMARY KEY, nome TEXT NOT NULL, email TEXT UNIQUE NOT NULL, senha TEXT NOT NULL,
+                  xp INT DEFAULT 0, nivel INT DEFAULT 0, created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tarefas (
+                  id SERIAL PRIMARY KEY, id_usuario INT REFERENCES usuarios(id) ON DELETE CASCADE,
+                  conteudo TEXT NOT NULL, status TEXT NOT NULL, data_criacao TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS flashcards (
+                  id SERIAL PRIMARY KEY, id_usuario INT REFERENCES usuarios(id) ON DELETE CASCADE,
+                  frente TEXT NOT NULL, verso TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao inicializar tabelas do banco de dados: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
 def hash_password(password): return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -70,13 +85,20 @@ def check_password(password, hashed): return bcrypt.checkpw(password.encode('utf
 
 
 def login(email, password):
-    conn = get_db_connection()
     user_info = None
-    with conn.cursor() as cur:
-        cur.execute("SELECT id, nome, senha FROM usuarios WHERE email = %s", (email,))
-        result = cur.fetchone()
-        if result and check_password(password, result[2]):
-            user_info = {"id": result[0], "name": result[1], "email": email}
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, nome, senha FROM usuarios WHERE email = %s", (email,))
+            result = cur.fetchone()
+            if result and check_password(password, result[2]):
+                user_info = {"id": result[0], "name": result[1], "email": email}
+    except Exception as e:
+        st.error(f"Erro durante o login: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
     return user_info
 
 
@@ -89,72 +111,114 @@ def logout():
 
 def load_user_data():
     user_id = st.session_state.user_id
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("SELECT xp, nivel FROM usuarios WHERE id = %s", (user_id,))
-        st.session_state.user_xp, st.session_state.user_level = cur.fetchone()
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT xp, nivel FROM usuarios WHERE id = %s", (user_id,))
+            st.session_state.user_xp, st.session_state.user_level = cur.fetchone()
 
-        cur.execute("SELECT id, conteudo, status FROM tarefas WHERE id_usuario = %s ORDER BY data_criacao DESC",
-                    (user_id,))
-        st.session_state.tasks = [{'id': r[0], 'content': r[1], 'status': r[2]} for r in cur.fetchall()]
+            cur.execute("SELECT id, conteudo, status FROM tarefas WHERE id_usuario = %s ORDER BY data_criacao DESC", (user_id,))
+            st.session_state.tasks = [{'id': r[0], 'content': r[1], 'status': r[2]} for r in cur.fetchall()]
 
-        cur.execute("SELECT id, frente, verso FROM flashcards WHERE id_usuario = %s ORDER BY created_at DESC",
-                    (user_id,))
-        st.session_state.flashcards = [{'id': r[0], 'frente': r[1], 'verso': r[2]} for r in cur.fetchall()]
+            cur.execute("SELECT id, frente, verso FROM flashcards WHERE id_usuario = %s ORDER BY created_at DESC", (user_id,))
+            st.session_state.flashcards = [{'id': r[0], 'frente': r[1], 'verso': r[2]} for r in cur.fetchall()]
+    except Exception as e:
+        st.error(f"Erro ao carregar dados do usuário: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
-# --- Funções CRUD (Create, Read, Update, Delete) ---
+# --- Funções CRUD (Create, Read, Update, Delete) com o pool de conexões ---
 
 def db_add_task(content):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("INSERT INTO tarefas (id_usuario, conteudo, status) VALUES (%s, %s, %s)",
-                    (st.session_state.user_id, content, 'A Fazer'))
-        conn.commit()
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO tarefas (id_usuario, conteudo, status) VALUES (%s, %s, %s)", (st.session_state.user_id, content, 'A Fazer'))
+            conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao adicionar tarefa: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
 def db_update_task_status(task_id, new_status):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("UPDATE tarefas SET status = %s WHERE id = %s AND id_usuario = %s",
-                    (new_status, task_id, st.session_state.user_id))
-        conn.commit()
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE tarefas SET status = %s WHERE id = %s AND id_usuario = %s", (new_status, task_id, st.session_state.user_id))
+            conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao atualizar status da tarefa: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
 def db_delete_task(task_id):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM tarefas WHERE id = %s AND id_usuario = %s", (task_id, st.session_state.user_id))
-        conn.commit()
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM tarefas WHERE id = %s AND id_usuario = %s", (task_id, st.session_state.user_id))
+            conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao deletar tarefa: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
 def db_add_flashcard(frente, verso):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("INSERT INTO flashcards (id_usuario, frente, verso) VALUES (%s, %s, %s)",
-                    (st.session_state.user_id, frente, verso))
-        conn.commit()
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO flashcards (id_usuario, frente, verso) VALUES (%s, %s, %s)", (st.session_state.user_id, frente, verso))
+            conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao adicionar flashcard: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
 def db_delete_flashcard(card_id):
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("DELETE FROM flashcards WHERE id = %s AND id_usuario = %s", (card_id, st.session_state.user_id))
-        conn.commit()
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM flashcards WHERE id = %s AND id_usuario = %s", (card_id, st.session_state.user_id))
+            conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao deletar flashcard: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
 def db_update_gamification():
-    conn = get_db_connection()
-    with conn.cursor() as cur:
-        cur.execute("UPDATE usuarios SET xp = %s, nivel = %s WHERE id = %s",
-                    (st.session_state.user_xp, st.session_state.user_level, st.session_state.user_id))
-        conn.commit()
+    conn = None
+    try:
+        conn = db_pool.getconn()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE usuarios SET xp = %s, nivel = %s WHERE id = %s", (st.session_state.user_xp, st.session_state.user_level, st.session_state.user_id))
+            conn.commit()
+    except Exception as e:
+        st.error(f"Erro ao atualizar gamificação: {e}")
+    finally:
+        if conn:
+            db_pool.putconn(conn)
 
 
 # --- 4. FUNÇÕES DE CADA PÁGINA ---
 
 def show_dashboard():
-    # ... (código do dashboard, sem alterações) ...
     st.title(f"🚀 Hub de Estudos, {st.session_state.user_name}!")
 
     tasks_by_status = {'A Fazer': [], 'Fazendo': [], 'Feito': []}
@@ -171,12 +235,12 @@ def show_dashboard():
         if st.form_submit_button("Adicionar Tarefa", type="primary", use_container_width=True):
             if new_task:
                 db_add_task(new_task)
+                load_user_data() # Recarrega os dados para atualizar a UI
                 st.toast(f"Tarefa '{new_task}' adicionada!", icon="✅")
                 st.rerun()
 
 
 def show_tarefas():
-    # ... (código das tarefas, sem alterações) ...
     st.title("🗂️ Gerenciador de Tarefas Kanban")
 
     tasks_by_status = {'A Fazer': [], 'Fazendo': [], 'Feito': []}
@@ -188,17 +252,16 @@ def show_tarefas():
 
     for i, list_name in enumerate(list_names):
         with cols[i]:
-            st.markdown(f'<div class="card" style="min-height: 400px;"><h4>{list_name}</h4><hr>',
-                        unsafe_allow_html=True)
+            st.markdown(f'<div class="card" style="min-height: 400px;"><h4>{list_name}</h4><hr>', unsafe_allow_html=True)
             for task in tasks_by_status[list_name]:
                 st.markdown(f"**{task['content']}**")
 
                 c1, c2 = st.columns(2)
-                new_status = c1.selectbox("Mover para:", list_names, index=i, key=f"select_{task['id']}",
-                                          label_visibility="collapsed")
+                new_status = c1.selectbox("Mover para:", list_names, index=i, key=f"select_{task['id']}", label_visibility="collapsed")
 
                 if c2.button("🗑️", key=f"del_{task['id']}", help="Excluir tarefa"):
                     db_delete_task(task['id'])
+                    load_user_data()
                     st.toast("Tarefa excluída!", icon="♻️")
                     st.rerun()
 
@@ -208,6 +271,7 @@ def show_tarefas():
                         st.session_state.user_xp += 10
                         st.toast("+10 XP! ✨")
                         db_update_gamification()
+                    load_user_data()
                     st.rerun()
                 st.markdown("---")
             st.markdown('</div>', unsafe_allow_html=True)
@@ -219,8 +283,8 @@ def show_ferramentas():
 
     with tab1:
         st.subheader("Técnica Pomodoro")
-        # (A lógica do pomodoro continua temporária, pois não a salvamos no DB)
-        # ... (código do Pomodoro omitido para brevidade, mas pode ser colado aqui) ...
+        # (A lógica do pomodoro continua temporária)
+        st.warning("O cronômetro Pomodoro ainda não está implementado.", icon="⚠️")
 
     with tab2:
         st.subheader("Meus Flashcards")
@@ -232,16 +296,16 @@ def show_ferramentas():
                 if st.form_submit_button("Adicionar Cartão"):
                     if front and back:
                         db_add_flashcard(front, back)
+                        load_user_data()
                         st.toast("Flashcard adicionado com sucesso!", icon="✨")
                         st.rerun()
                     else:
-                        st.warning("Preencha a frente и o verso do cartão.")
+                        st.warning("Preencha a frente e o verso do cartão.")
 
         if not st.session_state.flashcards:
             st.info("Você ainda não tem flashcards. Crie um acima!")
         else:
-            if 'flashcard_idx' not in st.session_state or st.session_state.flashcard_idx >= len(
-                    st.session_state.flashcards):
+            if 'flashcard_idx' not in st.session_state or st.session_state.flashcard_idx >= len(st.session_state.flashcards):
                 st.session_state.flashcard_idx = 0
             if 'flipped' not in st.session_state:
                 st.session_state.flipped = False
@@ -272,6 +336,7 @@ def show_ferramentas():
                 st.rerun()
             if c4.button("🗑️", use_container_width=True, help="Excluir este cartão"):
                 db_delete_flashcard(card['id'])
+                load_user_data()
                 st.toast("Cartão excluído!")
                 st.session_state.flashcard_idx = 0
                 st.rerun()
@@ -279,13 +344,12 @@ def show_ferramentas():
     with tab3:
         st.subheader("Anotações Rápidas")
         # (Anotações também são temporárias. Precisariam de uma tabela `notas` no DB)
-        st.session_state.notes = st.text_area("Suas Anotações", value=st.session_state.get('notes', ""), height=300,
-                                              label_visibility="collapsed")
+        st.session_state.notes = st.text_area("Suas Anotações", value=st.session_state.get('notes', ""), height=300, label_visibility="collapsed")
 
 
 # --- 5. LÓGICA PRINCIPAL DO APP ---
 inject_custom_css()
-init_db()
+init_db()  # Garante que as tabelas existam
 
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
@@ -317,36 +381,42 @@ if not st.session_state.logged_in:
             if st.form_submit_button("Criar Conta", use_container_width=True):
                 if name and email and password:
                     hashed_pass = hash_password(password)
-                    conn = get_db_connection()
+                    conn = None
                     try:
+                        conn = db_pool.getconn()
                         with conn.cursor() as cur:
-                            cur.execute("INSERT INTO usuarios (nome, email, senha) VALUES (%s, %s, %s)",
-                                        (name, email, hashed_pass))
+                            cur.execute("INSERT INTO usuarios (nome, email, senha) VALUES (%s, %s, %s)", (name, email, hashed_pass))
                             conn.commit()
                         st.success("Conta criada com sucesso! Volte para a aba 'Entrar' para fazer o login.")
                     except psycopg2.errors.UniqueViolation:
                         st.error("Este email já está cadastrado.")
                     except Exception as e:
-                        st.error(f"Ocorreu um erro: {e}")
+                        st.error(f"Ocorreu um erro ao criar a conta: {e}")
+                    finally:
+                        if conn:
+                            db_pool.putconn(conn)
                 else:
                     st.warning("Por favor, preencha todos os campos.")
 else:
-    load_user_data()
+    # Carrega os dados do usuário uma vez após o login bem-sucedido
+    if 'user_xp' not in st.session_state:
+        load_user_data()
 
     with st.sidebar:
         st.title(f"Olá, {st.session_state.user_name}!")
-        st.markdown(f"**Nível {st.session_state.user_level}: {LEVEL_NAMES[st.session_state.user_level]}**")
-        if st.session_state.user_level < len(XP_PER_LEVEL):
-            xp_needed = XP_PER_LEVEL[st.session_state.user_level]
-            xp_prev = XP_PER_LEVEL[st.session_state.user_level - 1] if st.session_state.user_level > 0 else 0
-            if (xp_needed - xp_prev) > 0:
-                progress_val = (st.session_state.user_xp - xp_prev) / (xp_needed - xp_prev)
-                st.progress(min(1.0, progress_val))
-            else:
-                st.progress(1.0)
-            st.caption(f"{st.session_state.user_xp} / {xp_needed} XP")
-        else:
-            st.success("Nível Máximo Atingido! 🏆")
+        if st.session_state.get('user_level') is not None:
+             st.markdown(f"**Nível {st.session_state.user_level}: {LEVEL_NAMES[st.session_state.user_level]}**")
+             if st.session_state.user_level < len(XP_PER_LEVEL):
+                 xp_needed = XP_PER_LEVEL[st.session_state.user_level]
+                 xp_prev = XP_PER_LEVEL[st.session_state.user_level - 1] if st.session_state.user_level > 0 else 0
+                 if (xp_needed - xp_prev) > 0:
+                     progress_val = (st.session_state.user_xp - xp_prev) / (xp_needed - xp_prev)
+                     st.progress(min(1.0, progress_val))
+                 else:
+                     st.progress(1.0)
+                 st.caption(f"{st.session_state.user_xp} / {xp_needed} XP")
+             else:
+                 st.success("Nível Máximo Atingido! 🏆")
 
         st.markdown("---")
         pages = {"Dashboard": "🏠", "Tarefas": "🗂️", "Ferramentas": "🛠️"}
@@ -354,7 +424,7 @@ else:
             st.session_state.page = "Dashboard"
         st.session_state.page = st.radio("Menu", options=pages.keys(), format_func=lambda p: f"{pages[p]} {p}")
         st.markdown("---")
-        st.info("EduSync Pro v5.0 (Flashcard Ed.)")
+        st.info("EduSync Pro v5.1 (Pool Ed.)")
         if st.button("Logout", use_container_width=True):
             logout()
 
