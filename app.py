@@ -6,6 +6,14 @@ from streamlit_calendar import calendar
 import json # <--- Módulo para trabalhar com JSON
 import os   # <--- Módulo para verificar se o arquivo existe
 
+# Dicionário de modos de IA
+AI_MODES = {
+    "✍️ Resumir texto": "gemma:2b",
+    "❓ Responder perguntas": "mistral",
+    "🧑‍🏫 Explicar passo a passo": "llama3:8b",
+    "⚡ Responder rápido (leve)": "phi3:mini"
+}
+
 # --- CONFIGURAÇÕES GERAIS E PERSISTÊNCIA ---
 st.set_page_config(
     page_title="EduSync Pro (Com Memória)",
@@ -21,13 +29,13 @@ STATE_FILE = "user_data.json"
 def save_state():
     """Salva o estado relevante da sessão em um arquivo JSON."""
     keys_to_save = [
-        'user_name', 'user_xp', 'user_level', 'achievements', 
-        'pomodoro_sessions_done', 'task_lists', 'calendar_events', 
+        'user_name', 'user_xp', 'user_level', 'achievements',
+        'pomodoro_sessions_done', 'task_lists', 'calendar_events',
         'flashcards', 'notes'
     ]
-    
+
     state_to_save = {key: st.session_state[key] for key in keys_to_save if key in st.session_state}
-    
+
     try:
         with open(STATE_FILE, 'w', encoding='utf-8') as f:
             json.dump(state_to_save, f, ensure_ascii=False, indent=4)
@@ -99,7 +107,7 @@ def check_achievements(event):
             achievements["ten_tasks"]["unlocked"] = True; unlocked_new = True
         if 0 <= datetime.now().hour < 4 and not achievements["night_owl"]["unlocked"]:
             achievements["night_owl"]["unlocked"] = True; unlocked_new = True
-            
+
     elif event == "pomodoro_completed":
         st.session_state.pomodoro_sessions_done += 1
         if st.session_state.pomodoro_sessions_done >= 5 and not achievements["pomodoro_pro"]["unlocked"]:
@@ -116,13 +124,25 @@ def check_achievements(event):
 
 
 # --- 3. FUNÇÕES DE SERVIÇO (IA) ---
-def get_local_ai_response(prompt):
+def get_local_ai_response(prompt: str, model: str = "gemma:2b"):
+    """
+    Envia um prompt para o modelo de IA local via Ollama e retorna a resposta.
+    """
     try:
-        response = ollama.chat(model='gemma:2b', messages=[{'role': 'user', 'content': prompt}])
-        return response['message']['content']
+        response = ollama.chat(
+            model=model,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        if "message" in response and "content" in response["message"]:
+            return response["message"]["content"]
+        else:
+            st.warning("A resposta da IA não veio no formato esperado.")
+            print(f"Resposta inesperada do Ollama: {response}") # Log para debug
+            return "⚠️ Não consegui gerar resposta do modelo."
     except Exception as e:
-        st.error(f"Falha ao conectar com o Ollama: {e}", icon="🔌")
-        return f"Ocorreu um erro ao acessar o modelo local."
+        st.error(f"Erro ao conectar ao Ollama: {e}", icon="🔌")
+        print(f"Erro ao conectar ao Ollama: {e}") # Log para debug
+        return f"Falha ao conectar ao serviço de IA. Verifique se o Ollama está em execução."
 
 # As funções de login/logout não são mais necessárias da mesma forma.
 # O "logout" pode ser reimaginado como "resetar progresso".
@@ -136,6 +156,38 @@ def reset_progress():
 
 # --- 4. FUNÇÕES DE CADA PÁGINA (com chamadas para save_state) ---
 
+def show_ai_tools():
+    st.title("🤖 Assistente de Estudos (IA Local)")
+
+    st.markdown("""
+    Use esta ferramenta para interagir com diferentes modelos de Inteligência Artificial rodando localmente no seu computador com Ollama.
+    Cada modelo tem uma especialidade.
+    """)
+
+    mode = st.selectbox("Escolha o modo de IA:", AI_MODES.keys())
+
+    chat_history_key = f"chat_history_{mode}"
+    if chat_history_key not in st.session_state:
+        st.session_state[chat_history_key] = []
+
+    for message in st.session_state[chat_history_key]:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    if prompt := st.chat_input("Digite sua pergunta ou texto..."):
+        st.session_state[chat_history_key].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        with st.chat_message("assistant"):
+            message_placeholder = st.empty()
+            with st.spinner("Pensando..."):
+                model_name = AI_MODES[mode]
+                full_response = get_local_ai_response(prompt, model=model_name)
+                message_placeholder.markdown(full_response)
+
+        st.session_state[chat_history_key].append({"role": "assistant", "content": full_response})
+
 def show_dashboard():
     # ... (código do dashboard igual) ...
     st.title(f"🚀 Hub de Estudos, {st.session_state.user_name}!")
@@ -145,7 +197,7 @@ def show_dashboard():
     col2.metric(label="🟡 Fazendo", value=len(st.session_state.task_lists['Fazendo']))
     col3.metric(label="🟢 Feito", value=len(st.session_state.task_lists['Feito']))
     st.markdown("---")
-    
+
     st.subheader("⚡ Adicionar Nova Tarefa Rápida")
     with st.form("quick_add_task_form", clear_on_submit=True):
         new_task = st.text_input("Qual a sua próxima tarefa?", placeholder="Ex: Pesquisar sobre a Revolução Francesa")
@@ -158,7 +210,7 @@ def show_dashboard():
 def show_tarefas():
     # ... (código das tarefas igual) ...
     st.title("🗂️ Gerenciador de Tarefas Kanban")
-    
+
     list_names = ['A Fazer', 'Fazendo', 'Feito']
     cols = st.columns(len(list_names))
     for i, list_name in enumerate(list_names):
@@ -167,7 +219,7 @@ def show_tarefas():
             for task_index, task in enumerate(st.session_state.task_lists[list_name][:]):
                 st.markdown(f"<div style='padding: 10px;'>{task}</div>", unsafe_allow_html=True)
                 new_status = st.selectbox(f"status_{list_name}_{task_index}", options=list_names, index=i, label_visibility="collapsed", key=f"select_{list_name}_{task_index}")
-                
+
                 if st.button("🗑️ Excluir", key=f"del_{list_name}_{task_index}", help="Excluir tarefa", use_container_width=True):
                     st.session_state.task_lists[list_name].pop(task_index)
                     save_state() # <--- Salva o estado
@@ -189,22 +241,87 @@ def show_tarefas():
 def show_ferramentas():
     st.title("🛠️ Ferramentas de Estudo")
     tab1, tab2, tab3 = st.tabs(["🍅 Cronômetro Pomodoro", "🗂️ Flashcards", "📝 Anotações"])
-    
+
     # ... (Lógica do Pomodoro igual) ...
 
     with tab2:
-        # ... (Lógica dos Flashcards) ...
-        with st.expander("➕ Adicionar Novo Cartão"):
-            with st.form("new_card_form", clear_on_submit=True):
-                front = st.text_input("Frente do cartão")
-                back = st.text_area("Verso do cartão")
-                if st.form_submit_button("Adicionar"):
-                    if front and back:
-                        st.session_state.flashcards.append({"frente": front, "verso": back})
-                        check_achievements("flashcard_created")
-                        save_state() # <--- Salva o estado
-                        st.toast("Cartão adicionado!", icon="✨")
-                        st.rerun()
+        st.subheader("🗂️ Seus Flashcards")
+
+        if not st.session_state.flashcards:
+            st.info("Você ainda não tem flashcards. Adicione um manualmente ou gere com IA!")
+
+        # Visualização dos flashcards existentes
+        for i, card in enumerate(st.session_state.flashcards):
+            col1, col2 = st.columns([0.8, 0.2])
+            with col1:
+                with st.expander(f"**{card['frente']}**"):
+                    st.write(card['verso'])
+            with col2:
+                if st.button(f"🗑️", key=f"del_card_{i}", help="Excluir este flashcard"):
+                    st.session_state.flashcards.pop(i)
+                    save_state()
+                    st.rerun()
+
+        st.markdown("---")
+
+        # Ferramentas para adicionar flashcards
+        col1_add, col2_add = st.columns(2)
+
+        with col1_add:
+            with st.expander("➕ Adicionar Novo Cartão Manualmente"):
+                with st.form("new_card_form", clear_on_submit=True):
+                    front = st.text_input("Frente do cartão")
+                    back = st.text_area("Verso do cartão")
+                    if st.form_submit_button("Adicionar Cartão"):
+                        if front and back:
+                            st.session_state.flashcards.append({"frente": front, "verso": back})
+                            check_achievements("flashcard_created")
+                            save_state()
+                            st.toast("Cartão adicionado!", icon="✨")
+                            st.rerun()
+
+        with col2_add:
+            with st.expander("🤖 Gerar Flashcards com IA"):
+                text_for_flashcards = st.text_area("Cole aqui o texto para estudo:", height=150, key="text_for_flashcards")
+
+                model_for_flashcards = "mistral"
+                prompt_template = (
+                    "A partir do texto abaixo, crie 5 flashcards concisos no formato 'Pergunta: [sua pergunta] | Resposta: [sua resposta]'.\n"
+                    "Cada flashcard deve estar em uma nova linha. Não adicione numeração ou marcadores.\n\n"
+                    "Texto:\n---\n{text}\n---"
+                )
+
+                if st.button("Gerar com IA", key="generate_flashcards_ai"):
+                    if text_for_flashcards:
+                        with st.spinner(f"Usando o modelo '{model_for_flashcards}' para criar os cartões..."):
+                            prompt = prompt_template.format(text=text_for_flashcards)
+                            generated_text = get_local_ai_response(prompt, model=model_for_flashcards)
+
+                            try:
+                                new_cards = []
+                                for line in generated_text.strip().split("\n"):
+                                    if " | " in line:
+                                        front_text, back_text = line.split(" | ", 1)
+                                        front = front_text.replace("Pergunta:", "").strip()
+                                        back = back_text.replace("Resposta:", "").strip()
+                                        if front and back:
+                                            new_cards.append({"frente": front, "verso": back})
+
+                                if new_cards:
+                                    st.session_state.flashcards.extend(new_cards)
+                                    check_achievements("flashcard_created")
+                                    save_state()
+                                    st.success(f"{len(new_cards)} flashcards gerados e adicionados!")
+                                    st.rerun()
+                                else:
+                                    st.error("A IA não retornou flashcards no formato esperado. Tente de novo.")
+                                    st.code(generated_text, language='text')
+
+                            except Exception as e:
+                                st.error(f"Erro ao processar a resposta da IA: {e}")
+                                st.code(generated_text, language='text')
+                    else:
+                        st.warning("Por favor, insira um texto para gerar os flashcards.")
     with tab3:
         st.subheader("Anotações Rápidas")
         st.session_state.notes = st.text_area("Suas Anotações", value=st.session_state.get('notes', ""), height=300, label_visibility="collapsed", on_change=save_state) # <--- Salva ao mudar
@@ -217,7 +334,7 @@ inject_custom_css()
 # Lógica de inicialização: Carregar estado ou definir padrões
 if 'state_loaded' not in st.session_state:
     loaded_data = load_state()
-    
+
     # Se carregou dados, usa-os
     if loaded_data:
         for key, value in loaded_data.items():
@@ -240,7 +357,7 @@ if 'state_loaded' not in st.session_state:
 if not st.session_state.user_name:
     st.title("👋 Bem-vindo ao `EduSync Pro`!")
     st.subheader("Sua plataforma de estudos inteligente e com memória.")
-    
+
     with st.form("profile_form"):
         name = st.text_input("Para começar, qual é o seu nome?")
         if st.form_submit_button("Salvar e Iniciar Jornada", type="primary"):
@@ -270,7 +387,7 @@ else:
             st.success("Nível Máximo Atingido! 🏆")
         st.markdown("---")
 
-        pages = {"Dashboard": "🏠", "Tarefas": "🗂️", "Ferramentas": "🛠️"}
+        pages = {"Dashboard": "🏠", "Tarefas": "🗂️", "Ferramentas": "🛠️", "Assistente IA": "🤖"}
         if 'page' not in st.session_state: st.session_state.page = "Dashboard"
         st.session_state.page = st.radio("Menu", options=pages.keys(), format_func=lambda page: f"{pages[page]} {page}")
         st.markdown("---")
@@ -285,3 +402,5 @@ else:
         show_tarefas()
     elif st.session_state.page == "Ferramentas":
         show_ferramentas()
+    elif st.session_state.page == "Assistente IA":
+        show_ai_tools()
