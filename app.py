@@ -174,7 +174,18 @@ def show_ai_tools():
     Cada modelo tem uma especialidade.
     """)
 
-    mode = st.selectbox("Escolha o modo de IA:", AI_MODES.keys())
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        mode = st.selectbox("Escolha o modo de IA:", AI_MODES.keys(), help="Selecione o modelo de IA que deseja usar.")
+    with col2:
+        # Adiciona espaço em branco para alinhar o botão verticalmente com o selectbox
+        st.write("")
+        st.write("")
+        if st.button("Testar Conexão", help="Verifica se o serviço Ollama está acessível."):
+            if check_ollama_connection():
+                st.toast("Conexão com Ollama bem-sucedida!", icon="✅")
+            else:
+                st.toast("Falha ao conectar com o Ollama. Verifique se o serviço está em execução.", icon="❌")
 
     chat_history_key = f"chat_history_{mode}"
     if chat_history_key not in st.session_state:
