@@ -124,6 +124,16 @@ def check_achievements(event):
 
 
 # --- 3. FUNÇÕES DE SERVIÇO (IA) ---
+@st.cache_data(ttl=30)
+def check_ollama_connection():
+    """Verifica se a conexão com o Ollama está ativa."""
+    try:
+        # A chamada list() é leve e boa para um health check.
+        ollama.list()
+        return True
+    except Exception:
+        return False
+
 def get_local_ai_response(prompt: str, model: str = "gemma:2b"):
     """
     Envia um prompt para o modelo de IA local via Ollama e retorna a resposta.
@@ -391,6 +401,13 @@ else:
         if 'page' not in st.session_state: st.session_state.page = "Dashboard"
         st.session_state.page = st.radio("Menu", options=pages.keys(), format_func=lambda page: f"{pages[page]} {page}")
         st.markdown("---")
+
+        # Indicador de status da conexão com Ollama
+        if check_ollama_connection():
+            st.success("Ollama: Conectado", icon="🟢")
+        else:
+            st.error("Ollama: Desconectado", icon="🔴")
+
         st.info("EduSync Pro (Com Memória)")
         if st.button("🗑️ Resetar Progresso", use_container_width=True, help="Apaga todos os dados e recomeça."):
             reset_progress()
